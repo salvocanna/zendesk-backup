@@ -103,6 +103,7 @@ do {
 
 } while (false);
 
+
 function saveTicketDocument($originalDocument)
 {
     $ticketData = $originalDocument['tickets'][0];
@@ -113,8 +114,15 @@ function saveTicketDocument($originalDocument)
             foreach ($audit['events'] as $event) {
                 if (isset($event['data']) && isset($event['data']['recording_url'])) {
                     $recordingURL = $event['data']['recording_url'];
-                    echo 'Found recording: '.$recordingURL;
-                    saveMedia($recordingURL, $ticketId, true);
+                    $media = saveMedia($recordingURL, $ticketId, true);
+
+                    // Now save the results back to the original structure.
+                    // So we will be able to match them later on if needed.
+                    $event['data']['downloaded_media'] = [
+                        'filename' => $media['originFilename'],
+                        'saved_filename' => $media['destinationFilename'],
+                        'type' => $media['type']
+                    ];
                 }
 
                 if (isset($event['attachments'])) {
@@ -123,7 +131,13 @@ function saveTicketDocument($originalDocument)
                         //Download this: $attachment['content_url']
                         //$attachment['downloaded_filename'] = xxx
                         $attachmentURL = $attachment['content_url'];
-                        saveMedia($attachmentURL, $ticketId, false);
+                        $media = saveMedia($attachmentURL, $ticketId, false);
+
+                        $attachment['downloaded_media'] = [
+                            'filename' => $media['originFilename'],
+                            'saved_filename' => $media['destinationFilename'],
+                            'type' => $media['type']
+                        ];
                     }
                 }
             }
@@ -175,11 +189,13 @@ function saveMedia($url, $ticketId, $isCall)
     }
 
     $filename = $ticketId.'_'.uniqid();
+    $originFilename = null;
 
     $matchFilename = preg_match('/.*filename=[\'\"]?([^\"]+)/', $response->getHeaderLine('Content-Disposition'), $matches);
 
     if ($matchFilename) {
-        $filename .= '_'.$matches[1];
+        $originFilename = $matches[1];
+        $filename .= '_'.$originFilename;
     }
 
     $destinationPath = ($isCall ? './call/' : './attachment/').$filename;
@@ -189,7 +205,7 @@ function saveMedia($url, $ticketId, $isCall)
 
     return [
         'type' => $fileType,
-        'originFilename' => null,
+        'originFilename' => $originFilename,
         'destinationFilename' => $filename,
     ];
 }
