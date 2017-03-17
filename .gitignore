@@ -2,3 +2,9 @@ composer.phar
 /vendor/
 credentials.json
 .idea
+/tickets/
+!/tickets/.gitkeep
+/attachments/
+!/attachments/.gitkeep
+/calls/
+!/calls/.gitkeep
