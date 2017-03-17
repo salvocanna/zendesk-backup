@@ -196,7 +196,7 @@ function saveMedia($url, $ticketId, $isCall)
         $filename .= '_'.$originFilename;
     }
 
-    $destinationPath = ($isCall ? './call/' : './attachment/').$filename;
+    $destinationPath = ($isCall ? './calls/' : './attachments/').$filename;
     file_put_contents($destinationPath, $response->getBody()->getContents());
 
     unset($response);
