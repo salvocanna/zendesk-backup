@@ -20,7 +20,7 @@ if (json_last_error() !== JSON_ERROR_NONE) {
 }
 
 $username = $config['username'];
-$password = $config['username'];
+$password = $config['password'];
 $concurrency = $config['concurrency'];
 $subdomain = $config['subdomain'];
 
@@ -128,8 +128,6 @@ function saveTicketDocument($originalDocument)
                 if (isset($event['attachments'])) {
                     foreach ($event['attachments'] as $attachment) {
                         echo 'Found attachment: '.$attachment['content_url'];
-                        //Download this: $attachment['content_url']
-                        //$attachment['downloaded_filename'] = xxx
                         $attachmentURL = $attachment['content_url'];
                         $media = saveMedia($attachmentURL, $ticketId, false);
 
