@@ -51,13 +51,15 @@ $updateRateLimit = function ($remaining) {
     $rateLimitRemaining = $remaining;
 };
 
-$rejected = [];
-
-$fromTicket = 150132;
+$fromTicket = 148132;
 $toTicket = 150132;
 
+$rejected = [];
+$toRetry = [];
+
 do {
-    $pool = new Pool($client, $requests($fromTicket, $toTicket), [
+
+    $pool = new Pool($client, getRequestBatchToProcess($fromTicket, $toTicket, $toRetry), [
         'options' => [
             'auth' => [
                 $username,
@@ -73,25 +75,30 @@ do {
             } else {
                 throw new \Exception('Got a JSON decode issue');
             }
-            echo 'Got response'.get_class($response)." - $index\n\n";
+            echo '.';
+            //echo 'Got response'.get_class($response)." - $index\n\n";
         },
         'rejected' => function (RequestException $reason, $index) {
             global $rejected;
-
-            var_dump($reason);
+            echo "-";
+            //var_dump($reason->getResponse()->getStatusCode(), $reason->getResponse()->getHeaders(), $reason->getResponse()->getBody()->getContents());
 
             $bodyResponseContents = $reason->getResponse()->getBody()->getContents();
+            $error = null;
+
             $r = json_decode($bodyResponseContents, true);
             if (json_last_error() === JSON_ERROR_NONE) {
-                $error = null;
+
                 if (isset($r['error'])) {
                     $error = $r['error'];
                 }
-                $rejected[] = [
-                    'ticketId' => $reason->getRequest()->getHeader('x-ticket-id')[0],
-                    'error' => $error,
-                ];
             }
+
+            $rejected[] = [
+                'ticketId' => $reason->getRequest()->getHeader('x-ticket-id')[0],
+                'error' => $error,
+                'statusCode' => $reason->getResponse()->getStatusCode(),
+            ];
         },
     ]);
 
@@ -101,10 +108,33 @@ do {
     // Force the pool of requests to complete.
     $promise->wait();
 
-    var_dump("Rejected: ", $rejected);
+    //Reset it at every iteration.
+    $toRetry = [];
+
+    foreach ($rejected as $rejectedTicketRequest) {
+        if ($rejectedTicketRequest['statusCode'] !== 404) {
+            $toRetry[] = $rejectedTicketRequest['ticketId'];
+        }
+    }
+
+    var_dump("Rejected: ", $rejected, "Gonna retry: ", $toRetry);
+
+    $rejected = [];
 
 } while (false);
 
+function getRequestBatchToProcess($batchFrom, $batchTo, $toRetry = [])
+{
+    global $requests;
+
+    $list = $requests($batchFrom, $batchTo);
+
+    foreach ($toRetry as $ticketId) {
+        $list[] = $ticketId;
+    }
+
+    return $list;
+}
 
 function saveTicketDocument($originalDocument)
 {
@@ -117,6 +147,7 @@ function saveTicketDocument($originalDocument)
                 if (isset($event['data']) && isset($event['data']['recording_url'])) {
                     $recordingURL = $event['data']['recording_url'];
                     $callId = $event['data']['call_id'];
+
                     $media = saveMedia($recordingURL, $ticketId, $callId, true);
 
                     // Now save the results back to the original structure.
@@ -130,9 +161,9 @@ function saveTicketDocument($originalDocument)
 
                 if (isset($event['attachments'])) {
                     foreach ($event['attachments'] as $attachment) {
-                        echo 'Found attachment: '.$attachment['content_url'];
                         $attachmentURL = $attachment['content_url'];
                         $attachmentId = $attachment['id'];
+
                         $media = saveMedia($attachmentURL, $ticketId, $attachmentId, false);
 
                         $attachment['downloaded_media'] = [
@@ -173,12 +204,13 @@ function saveMedia($url, $ticketId, $mediaId, $isCall)
 {
     global $client, $username, $password;
 
-    $response = $client->request('GET', $url, [
+    echo "\\";
+    $response = $client->requestAsync('GET', $url, [
         'auth' => [
             $username,
             $password,
         ],
-    ]);
+    ])->wait();
 
     $matchContentType = preg_match('/([\w\/]+)(;\s+charset=([^\s"]+))/', $response->getHeaderLine('Content-Type'), $contentTypeMatches);
     $fileType = null;
