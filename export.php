@@ -77,7 +77,9 @@ do {
         },
         'rejected' => function (RequestException $reason, $index) {
             global $rejected;
+
             var_dump($reason);
+
             $bodyResponseContents = $reason->getResponse()->getBody()->getContents();
             $r = json_decode($bodyResponseContents, true);
             if (json_last_error() === JSON_ERROR_NONE) {
@@ -114,7 +116,8 @@ function saveTicketDocument($originalDocument)
             foreach ($audit['events'] as $event) {
                 if (isset($event['data']) && isset($event['data']['recording_url'])) {
                     $recordingURL = $event['data']['recording_url'];
-                    $media = saveMedia($recordingURL, $ticketId, true);
+                    $callId = $event['data']['call_id'];
+                    $media = saveMedia($recordingURL, $ticketId, $callId, true);
 
                     // Now save the results back to the original structure.
                     // So we will be able to match them later on if needed.
@@ -129,7 +132,8 @@ function saveTicketDocument($originalDocument)
                     foreach ($event['attachments'] as $attachment) {
                         echo 'Found attachment: '.$attachment['content_url'];
                         $attachmentURL = $attachment['content_url'];
-                        $media = saveMedia($attachmentURL, $ticketId, false);
+                        $attachmentId = $attachment['id'];
+                        $media = saveMedia($attachmentURL, $ticketId, $attachmentId, false);
 
                         $attachment['downloaded_media'] = [
                             'filename' => $media['originFilename'],
@@ -141,9 +145,6 @@ function saveTicketDocument($originalDocument)
             }
         }
     }
-
-    //var_dump($originalDocument);
-    exit;
 
     //Shuffle some stuff around.
     $ticketData = $originalDocument['tickets'][0];
@@ -168,7 +169,7 @@ function saveTicketDocument($originalDocument)
     file_put_contents('./tickets/'.$ticketId.'.json', json_encode($newDocument, JSON_PRETTY_PRINT));
 }
 
-function saveMedia($url, $ticketId, $isCall)
+function saveMedia($url, $ticketId, $mediaId, $isCall)
 {
     global $client, $username, $password;
 
@@ -186,7 +187,7 @@ function saveMedia($url, $ticketId, $isCall)
         $fileType = $contentTypeMatches[1];
     }
 
-    $filename = $ticketId.'_'.uniqid();
+    $filename = $ticketId.'_'.$mediaId; //uniqid();
     $originFilename = null;
 
     $matchFilename = preg_match('/.*filename=[\'\"]?([^\"]+)/', $response->getHeaderLine('Content-Disposition'), $matches);
@@ -197,6 +198,11 @@ function saveMedia($url, $ticketId, $isCall)
     }
 
     $destinationPath = ($isCall ? './calls/' : './attachments/').$filename;
+
+    if (file_exists($destinationPath)) {
+        unlink($destinationPath);
+    }
+
     file_put_contents($destinationPath, $response->getBody()->getContents());
 
     unset($response);
