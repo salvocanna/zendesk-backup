@@ -1,0 +1,8 @@
+{
+    "name": "salvocanna/zendesk-backup",
+    "type": "project",
+    "require": {
+        "guzzlehttp/guzzle": "^6.2"
+    },
+    "license": "MIT"
+}
