@@ -1,5 +1,5 @@
 <?php
-
+ini_set('memory_limit', '1G');
 require_once './vendor/autoload.php';
 
 use GuzzleHttp\Client;
@@ -7,6 +7,15 @@ use GuzzleHttp\Exception\RequestException;
 use GuzzleHttp\Pool;
 use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
+use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Middleware;
+use Concat\Http\Middleware\Logger;
+use Concat\Http\Middleware\RateLimiter;
+use GuzzleHttp\Handler\CurlMultiHandler;
+
+
+$lastRequestTime = null;
+$requestAllowance = null;
 
 if (!file_exists('credentials.json')) {
     echo "credentials.json doesn't exists! Unable to load config parameters\n\n";
@@ -25,63 +34,123 @@ $concurrency = $config['concurrency'];
 $subdomain = $config['subdomain'];
 
 $ticketAuditUrl = function ($ticketId) {
-    global $subdomain;
-    return 'https://'.$subdomain.'.zendesk.com/api/v2/tickets/'.$ticketId.'/audits.json?include=users,tickets';
+    return '/api/v2/tickets/'.$ticketId.'/audits.json?include=users,tickets';
 };
 
-$client = new Client();
+$stack = new HandlerStack();
+
+$stack->setHandler(new CurlMultiHandler());
+
+$stack->push(Middleware::redirect());
+
+$stack->push(
+    Middleware::retry(function ($retries, $request, $response, $exception) {
+        if ($response) {
+            if ($response->getStatusCode() >= 500 && ($retries < 3)) {
+                echo "Retrying ... \n";
+            }
+            return $response->getStatusCode() >= 500 && ($retries < 3);
+        }
+
+        return false;
+    },
+    function ($delay) {
+        echo "Delaying $delay * 1000...\n";
+        return $delay * 1;
+    })
+);
+
+//$rateLimitProvider = new SimpleeRateLimitProvider();
+//$stack->push(new RateLimiter($rateLimitProvider));
+
+$loggerMiddleware = new Logger(function ($level, $message, array $context) {
+    echo "Message: ".$message."\n";
+});
+
+$loggerMiddleware->setLogLevel(\Psr\Log\LogLevel::DEBUG);
+$loggerMiddleware->setRequestLoggingEnabled(true);
+
+$stack->push($loggerMiddleware);
+
+$client = new Client([
+    'base_uri' => 'https://'.$subdomain.'.zendesk.com/',
+    'handler' => $stack,
+    'debug' => false,
+    'cookies' => true,
+    'curl' => [
+        CURLOPT_FORBID_REUSE => false,
+        CURLOPT_FRESH_CONNECT => false,
+    ],
+]);
 
 $requests = function ($from, $to) use ($ticketAuditUrl) {
     for ($i = $from; $i <= $to; ++$i) {
         yield new Request('GET', $ticketAuditUrl($i), [
             'x-ticket-id' => $i,
+            'curl' => [
+                CURLOPT_FORBID_REUSE => false,
+                CURLOPT_FRESH_CONNECT => false,
+            ]
         ]);
     }
 };
 
-$rateLimitTotal = -INF;
-$rateLimitRemaining = +INF;
 
-$updateRateLimit = function ($remaining) {
-    global $rateLimitRemaining, $rateLimitTotal;
-    if ($remaining > $rateLimitTotal) {
-        $rateLimitTotal = $remaining;
-    }
+$fromTicket = 149130;
+$toTicket = 150140;
 
-    $rateLimitRemaining = $remaining;
-};
-
-$fromTicket = 148132;
-$toTicket = 150132;
+$quantityToProcess = 1;
 
 $rejected = [];
 $toRetry = [];
 
+$lastProcessed = $fromTicket;
 do {
 
-    $pool = new Pool($client, getRequestBatchToProcess($fromTicket, $toTicket, $toRetry), [
+    echo "Starting at ".date("H:i:s")."\n\n";
+
+    $batchFrom = $lastProcessed;
+    $batchTo = min($batchFrom + $quantityToProcess, $toTicket);
+
+    echo "Batch from ".$batchFrom." - to - ".$batchTo."\n";
+
+    $pool = new Pool($client, $requests($batchFrom, $batchTo), [
         'options' => [
             'auth' => [
                 $username,
                 $password,
             ],
         ],
-        'concurrency' => $concurrency,
+        'concurrency' => $quantityToProcess,
         'fulfilled' => function (Response $response, $index, $promise) {
-
             $contents = json_decode($response->getBody()->getContents(), true);
+
             if (json_last_error() === JSON_ERROR_NONE) {
-                saveTicketDocument($contents);
+                if ($response->getStatusCode() === 200) {
+                    saveTicketDocument($contents);
+                }
+
             } else {
                 throw new \Exception('Got a JSON decode issue');
             }
-            echo '.';
-            //echo 'Got response'.get_class($response)." - $index\n\n";
         },
         'rejected' => function (RequestException $reason, $index) {
             global $rejected;
-            echo "-";
-            //var_dump($reason->getResponse()->getStatusCode(), $reason->getResponse()->getHeaders(), $reason->getResponse()->getBody()->getContents());
+
+            if ($reason->getResponse() && $reason->getResponse()->getStatusCode() === 404) {
+                return;
+            }
+
+            if (!$reason->getResponse()) {
+                var_dump("Reason for no response:", $reason->getCode());
+                return;
+            }
+
+//            global $rateLimitRemaining;
+//
+//            $rateLimitRemaining = $reason->getResponse()->getHeaderLine('X-Rate-Limit-Remaining');
+
+            echo $reason->getResponse()->getStatusCode() ." => ".json_encode($reason->getResponse()->getHeaders()) . " =>". $reason->getResponse()->getBody()->getContents()."\n";
 
             $bodyResponseContents = $reason->getResponse()->getBody()->getContents();
             $error = null;
@@ -111,35 +180,30 @@ do {
     //Reset it at every iteration.
     $toRetry = [];
 
-    foreach ($rejected as $rejectedTicketRequest) {
-        if ($rejectedTicketRequest['statusCode'] !== 404) {
-            $toRetry[] = $rejectedTicketRequest['ticketId'];
-        }
-    }
+    $lastProcessed = $batchTo;
 
-    var_dump("Rejected: ", $rejected, "Gonna retry: ", $toRetry);
+    echo "Finishing at ".date("H:i:s")."\n";
+
+    unset($pool, $promise);
+
+    gc_collect_cycles();
 
     $rejected = [];
 
-} while (false);
+} while (($batchTo + $quantityToProcess) < $toTicket);
 
-function getRequestBatchToProcess($batchFrom, $batchTo, $toRetry = [])
-{
-    global $requests;
-
-    $list = $requests($batchFrom, $batchTo);
-
-    foreach ($toRetry as $ticketId) {
-        $list[] = $ticketId;
-    }
-
-    return $list;
-}
 
 function saveTicketDocument($originalDocument)
 {
+    if (!isset($originalDocument['tickets'])) {
+        var_dump("Document without ticket:", $originalDocument);
+        exit;
+    }
+
     $ticketData = $originalDocument['tickets'][0];
     $ticketId = $ticketData['id'];
+
+    $promises = [];
 
     foreach ($originalDocument['audits'] as $audit) {
         if (isset($audit['events'])) {
@@ -148,15 +212,18 @@ function saveTicketDocument($originalDocument)
                     $recordingURL = $event['data']['recording_url'];
                     $callId = $event['data']['call_id'];
 
-                    $media = saveMedia($recordingURL, $ticketId, $callId, true);
+                    //sometimes you get "" as 'recording_url' as there's no recording available
+                    if (strlen($recordingURL) > 0) {
+                        $media = saveMedia($recordingURL, $ticketId, $callId, true);
 
-                    // Now save the results back to the original structure.
-                    // So we will be able to match them later on if needed.
-                    $event['data']['downloaded_media'] = [
-                        'filename' => $media['originFilename'],
-                        'saved_filename' => $media['destinationFilename'],
-                        'type' => $media['type']
-                    ];
+                        // Now save the results back to the original structure.
+                        // So we will be able to match them later on if needed.
+                        $event['data']['downloaded_media'] = [
+                            'filename' => $media['originFilename'],
+                            'saved_filename' => $media['destinationFilename'],
+                            'type' => $media['type']
+                        ];
+                    }
                 }
 
                 if (isset($event['attachments'])) {
@@ -190,10 +257,7 @@ function saveTicketDocument($originalDocument)
             'url' => $item['url'],
             'name' => $item['name'],
             'email' => $item['email'],
-            'created_at' => $item['created_at'],
             'phone' => $item['phone'],
-            'organization_id' => $item['organization_id'],
-            'role' => $item['role'],
         ];
     }, $originalDocument['users']);
 
@@ -204,14 +268,21 @@ function saveMedia($url, $ticketId, $mediaId, $isCall)
 {
     global $client, $username, $password;
 
-    echo "\\";
-    $response = $client->requestAsync('GET', $url, [
+    $response = $client->request('GET', $url, [
         'auth' => [
             $username,
             $password,
         ],
-    ])->wait();
+        'curl' => [
+            CURLOPT_FORBID_REUSE => false,
+            CURLOPT_FRESH_CONNECT => false,
+        ],
+    ]);
 
+    if ($response->getHeaderLine('Location') || $response->getStatusCode() === 302) {
+        echo "Got redirect response!";
+        exit;
+    }
     $matchContentType = preg_match('/([\w\/]+)(;\s+charset=([^\s"]+))/', $response->getHeaderLine('Content-Type'), $contentTypeMatches);
     $fileType = null;
 
@@ -219,7 +290,7 @@ function saveMedia($url, $ticketId, $mediaId, $isCall)
         $fileType = $contentTypeMatches[1];
     }
 
-    $filename = $ticketId.'_'.$mediaId; //uniqid();
+    $filename = $ticketId.'_'.$mediaId;
     $originFilename = null;
 
     $matchFilename = preg_match('/.*filename=[\'\"]?([^\"]+)/', $response->getHeaderLine('Content-Disposition'), $matches);
