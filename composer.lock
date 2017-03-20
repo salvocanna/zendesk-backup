@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#composer-lock-the-lock-file",
         "This file is @generated automatically"
     ],
-    "content-hash": "8c4326c2fe2a418e6a1ddb20cff6dba6",
+    "content-hash": "0ff79833839c37f9eb3447cc035c65dc",
     "packages": [
         {
             "name": "guzzlehttp/guzzle",
@@ -333,56 +333,6 @@
                 "psr7"
             ],
             "time": "2015-06-16T06:35:18+00:00"
-        },
-        {
-            "name": "rtheunissen/guzzle-rate-limiter",
-            "version": "v0.4.0",
-            "source": {
-                "type": "git",
-                "url": "https://github.com/rtheunissen/guzzle-rate-limiter.git",
-                "reference": "421854b9a83bfe598db0b49193936912b5e8135f"
-            },
-            "dist": {
-                "type": "zip",
-                "url": "https://api.github.com/repos/rtheunissen/guzzle-rate-limiter/zipball/421854b9a83bfe598db0b49193936912b5e8135f",
-                "reference": "421854b9a83bfe598db0b49193936912b5e8135f",
-                "shasum": ""
-            },
-            "require": {
-                "guzzlehttp/guzzle": "~6.0",
-                "php": ">=5.5",
-                "psr/log": "~1.0"
-            },
-            "require-dev": {
-                "mockery/mockery": "~0.9",
-                "phpunit/phpunit": "~4.6"
-            },
-            "type": "library",
-            "autoload": {
-                "psr-4": {
-                    "Concat\\Http\\Middleware\\": "src"
-                }
-            },
-            "notification-url": "https://packagist.org/downloads/",
-            "license": [
-                "MIT"
-            ],
-            "authors": [
-                {
-                    "name": "Rudi Theunissen",
-                    "email": "rudolf.theunissen@gmail.com"
-                }
-            ],
-            "description": "Guzzle 6 middleware used to delay requests dynamically",
-            "keywords": [
-                "Guzzle",
-                "Rate",
-                "http",
-                "middleware",
-                "psr7",
-                "throttle"
-            ],
-            "time": "2017-01-19T22:43:50+00:00"
         }
     ],
     "packages-dev": [],

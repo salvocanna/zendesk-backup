@@ -3,8 +3,7 @@
     "type": "project",
     "require": {
         "guzzlehttp/guzzle": "^6.2",
-        "rtheunissen/guzzle-log-middleware": "^0.4.0",
-        "rtheunissen/guzzle-rate-limiter": "^0.4.0"
+        "rtheunissen/guzzle-log-middleware": "^0.4.0"
     },
     "license": "MIT"
 }
