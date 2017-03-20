@@ -10,9 +10,7 @@ use GuzzleHttp\Psr7\Response;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Middleware;
 use Concat\Http\Middleware\Logger;
-use Concat\Http\Middleware\RateLimiter;
 use GuzzleHttp\Handler\CurlMultiHandler;
-
 
 $lastRequestTime = null;
 $requestAllowance = null;
@@ -38,7 +36,6 @@ $ticketAuditUrl = function ($ticketId) {
 };
 
 $stack = new HandlerStack();
-
 $stack->setHandler(new CurlMultiHandler());
 
 $stack->push(Middleware::redirect());
@@ -46,10 +43,10 @@ $stack->push(Middleware::redirect());
 $stack->push(
     Middleware::retry(function ($retries, $request, $response, $exception) {
         if ($response) {
-            if ($response->getStatusCode() >= 500 && ($retries < 3)) {
+            if ($response->getStatusCode() < 1 || ($response->getStatusCode() >= 500 && ($retries < 3))) {
                 echo "Retrying ... \n";
+                return true;
             }
-            return $response->getStatusCode() >= 500 && ($retries < 3);
         }
 
         return false;
@@ -60,9 +57,6 @@ $stack->push(
     })
 );
 
-//$rateLimitProvider = new SimpleeRateLimitProvider();
-//$stack->push(new RateLimiter($rateLimitProvider));
-
 $loggerMiddleware = new Logger(function ($level, $message, array $context) {
     echo "Message: ".$message."\n";
 });
@@ -71,6 +65,7 @@ $loggerMiddleware->setLogLevel(\Psr\Log\LogLevel::DEBUG);
 $loggerMiddleware->setRequestLoggingEnabled(true);
 
 $stack->push($loggerMiddleware);
+
 
 $client = new Client([
     'base_uri' => 'https://'.$subdomain.'.zendesk.com/',
@@ -96,23 +91,38 @@ $requests = function ($from, $to) use ($ticketAuditUrl) {
 };
 
 
-$fromTicket = 149130;
+$fromTicket = 145130;
 $toTicket = 150140;
 
-$quantityToProcess = 1;
+$quantityToProcess = 690;
 
 $rejected = [];
 $toRetry = [];
 
 $lastProcessed = $fromTicket;
-do {
 
-    echo "Starting at ".date("H:i:s")."\n\n";
+
+$requestProcessed = [];
+
+$timeKey = function() {
+    return date('Hi');
+};
+
+do {
+    if (!isset($requestProcessed[$timeKey()])) {
+        $requestProcessed[$timeKey()] = 0;
+    }
+
+    if ($requestProcessed[$timeKey()] > 600) {
+        $interval = (60 - date("s")) + 1;
+        echo "Sleeping till next window ($interval s)...\n";
+        sleep($interval);
+    }
 
     $batchFrom = $lastProcessed;
     $batchTo = min($batchFrom + $quantityToProcess, $toTicket);
 
-    echo "Batch from ".$batchFrom." - to - ".$batchTo."\n";
+    echo "Starting at ".date("H:i:s")." with tickets from $batchFrom to $batchTo\n\n";
 
     $pool = new Pool($client, $requests($batchFrom, $batchTo), [
         'options' => [
@@ -121,34 +131,40 @@ do {
                 $password,
             ],
         ],
-        'concurrency' => $quantityToProcess,
-        'fulfilled' => function (Response $response, $index, $promise) {
-            $contents = json_decode($response->getBody()->getContents(), true);
+        'concurrency' => 100,
+        'fulfilled' => function (Response $response, $index, $promise) use ($timeKey) {
 
-            if (json_last_error() === JSON_ERROR_NONE) {
-                if ($response->getStatusCode() === 200) {
-                    saveTicketDocument($contents);
+            global $requestProcessed;
+            ++$requestProcessed[$timeKey()];
+
+            if ($response->getStatusCode() === 200) {
+                $contents = json_decode($response->getBody()->getContents(), true);
+
+                if (json_last_error() === JSON_ERROR_NONE) {
+                    if ($response->getStatusCode() === 200) {
+                        saveTicketDocument($contents);
+                    }
+                } else {
+                    var_dump($response->getBody()->getContents());
+                    throw new \Exception('Got a JSON decode issue');
                 }
-
-            } else {
-                throw new \Exception('Got a JSON decode issue');
             }
         },
-        'rejected' => function (RequestException $reason, $index) {
-            global $rejected;
+        'rejected' => function (RequestException $reason, $index) use ($timeKey) {
+            //global $rejected;
+
+            global $requestProcessed;
+            ++$requestProcessed[$timeKey()];
 
             if ($reason->getResponse() && $reason->getResponse()->getStatusCode() === 404) {
                 return;
             }
 
+            //We get this weird cases every once in a while - TODO needs more details on why
             if (!$reason->getResponse()) {
                 var_dump("Reason for no response:", $reason->getCode());
                 return;
             }
-
-//            global $rateLimitRemaining;
-//
-//            $rateLimitRemaining = $reason->getResponse()->getHeaderLine('X-Rate-Limit-Remaining');
 
             echo $reason->getResponse()->getStatusCode() ." => ".json_encode($reason->getResponse()->getHeaders()) . " =>". $reason->getResponse()->getBody()->getContents()."\n";
 
@@ -163,11 +179,11 @@ do {
                 }
             }
 
-            $rejected[] = [
+            /*$rejected[] = [
                 'ticketId' => $reason->getRequest()->getHeader('x-ticket-id')[0],
                 'error' => $error,
                 'statusCode' => $reason->getResponse()->getStatusCode(),
-            ];
+            ];*/
         },
     ]);
 
@@ -196,14 +212,11 @@ do {
 function saveTicketDocument($originalDocument)
 {
     if (!isset($originalDocument['tickets'])) {
-        var_dump("Document without ticket:", $originalDocument);
-        exit;
+        throw new \Exception("Document without ticket: ".json_encode($originalDocument));
     }
 
     $ticketData = $originalDocument['tickets'][0];
     $ticketId = $ticketData['id'];
-
-    $promises = [];
 
     foreach ($originalDocument['audits'] as $audit) {
         if (isset($audit['events'])) {
