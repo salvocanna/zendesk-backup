@@ -1,16 +1,18 @@
 <?php
+
 ini_set('memory_limit', '1G');
 require_once './vendor/autoload.php';
+require_once './GuzzleRequestMetaMiddleware.php';
 
+use Concat\Http\Middleware\Logger;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\RequestException;
+use GuzzleHttp\Handler\CurlMultiHandler;
+use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Middleware;
 use GuzzleHttp\Pool;
 use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
-use GuzzleHttp\HandlerStack;
-use GuzzleHttp\Middleware;
-use Concat\Http\Middleware\Logger;
-use GuzzleHttp\Handler\CurlMultiHandler;
 
 $lastRequestTime = null;
 $requestAllowance = null;
@@ -28,8 +30,16 @@ if (json_last_error() !== JSON_ERROR_NONE) {
 
 $username = $config['username'];
 $password = $config['password'];
-$concurrency = $config['concurrency'];
+$apiWindowLimit = $config['rateLimitPerMinute'];
 $subdomain = $config['subdomain'];
+
+$fromTicket = 145130;
+$toTicket = 150140;
+
+//$apiWindowLimit = 690; //690
+$quantityToProcess = $apiWindowLimit;
+
+$skipSavedTickets = true;
 
 $ticketAuditUrl = function ($ticketId) {
     return '/api/v2/tickets/'.$ticketId.'/audits.json?include=users,tickets';
@@ -40,11 +50,14 @@ $stack->setHandler(new CurlMultiHandler());
 
 $stack->push(Middleware::redirect());
 
+$stack->push(GuzzleRequestMetaMiddleware::middleware());
+
 $stack->push(
     Middleware::retry(function ($retries, $request, $response, $exception) {
         if ($response) {
             if ($response->getStatusCode() < 1 || ($response->getStatusCode() >= 500 && ($retries < 3))) {
                 echo "Retrying ... \n";
+
                 return true;
             }
         }
@@ -53,19 +66,22 @@ $stack->push(
     },
     function ($delay) {
         echo "Delaying $delay * 1000...\n";
+
         return $delay * 1;
     })
 );
 
 $loggerMiddleware = new Logger(function ($level, $message, array $context) {
-    echo "Message: ".$message."\n";
+    if ($level === 'debug') {
+        echo $message."\n";
+    }
 });
 
+// Change it to `true` for some debug juice
+$loggerMiddleware->setRequestLoggingEnabled(false);
 $loggerMiddleware->setLogLevel(\Psr\Log\LogLevel::DEBUG);
-$loggerMiddleware->setRequestLoggingEnabled(true);
 
 $stack->push($loggerMiddleware);
-
 
 $client = new Client([
     'base_uri' => 'https://'.$subdomain.'.zendesk.com/',
@@ -78,33 +94,32 @@ $client = new Client([
     ],
 ]);
 
-$requests = function ($from, $to) use ($ticketAuditUrl) {
+$tickets404 = get404TicketIds();
+
+$requests = function ($from, $to) use ($ticketAuditUrl, $skipSavedTickets, $tickets404) {
     for ($i = $from; $i <= $to; ++$i) {
+        if ($skipSavedTickets && (file_exists('./tickets/'.$i.'.json') || in_array($i, $tickets404))) {
+            continue;
+        }
+
         yield new Request('GET', $ticketAuditUrl($i), [
             'x-ticket-id' => $i,
             'curl' => [
                 CURLOPT_FORBID_REUSE => false,
                 CURLOPT_FRESH_CONNECT => false,
-            ]
+            ],
+            'Extra' => [
+                'Ticket-Id' => $i,
+            ],
         ]);
     }
 };
 
-
-$fromTicket = 145130;
-$toTicket = 150140;
-
-$quantityToProcess = 690;
-
-$rejected = [];
-$toRetry = [];
-
 $lastProcessed = $fromTicket;
-
 
 $requestProcessed = [];
 
-$timeKey = function() {
+$timeKey = function () {
     return date('Hi');
 };
 
@@ -113,16 +128,18 @@ do {
         $requestProcessed[$timeKey()] = 0;
     }
 
-    if ($requestProcessed[$timeKey()] > 600) {
-        $interval = (60 - date("s")) + 1;
+    if ($requestProcessed[$timeKey()] >= $apiWindowLimit) {
+        $interval = (60 - date('s')) + 1;
         echo "Sleeping till next window ($interval s)...\n";
         sleep($interval);
     }
 
+    $quantityToProcess = $apiWindowLimit - $requestProcessed[$timeKey()];
+
     $batchFrom = $lastProcessed;
     $batchTo = min($batchFrom + $quantityToProcess, $toTicket);
 
-    echo "Starting at ".date("H:i:s")." with tickets from $batchFrom to $batchTo\n\n";
+    echo 'Starting at '.date('H:i:s')." with tickets from $batchFrom to $batchTo\n\n";
 
     $pool = new Pool($client, $requests($batchFrom, $batchTo), [
         'options' => [
@@ -148,42 +165,40 @@ do {
                     var_dump($response->getBody()->getContents());
                     throw new \Exception('Got a JSON decode issue');
                 }
+            } elseif ($response->getStatusCode() === 404) {
+                addTicketTo404($response->getHeaderLine('x-ticket-id'));
             }
         },
         'rejected' => function (RequestException $reason, $index) use ($timeKey) {
-            //global $rejected;
 
             global $requestProcessed;
             ++$requestProcessed[$timeKey()];
 
             if ($reason->getResponse() && $reason->getResponse()->getStatusCode() === 404) {
+                //This shouldn't even happen.
+                addTicketTo404($reason->getRequest()->getHeaderLine('x-ticket-id'));
+
                 return;
             }
 
             //We get this weird cases every once in a while - TODO needs more details on why
             if (!$reason->getResponse()) {
-                var_dump("Reason for no response:", $reason->getCode());
+                var_dump('Reason for no response:', $reason->getCode());
+
                 return;
             }
 
-            echo $reason->getResponse()->getStatusCode() ." => ".json_encode($reason->getResponse()->getHeaders()) . " =>". $reason->getResponse()->getBody()->getContents()."\n";
+            echo $reason->getResponse()->getStatusCode().' => '.json_encode($reason->getResponse()->getHeaders()).' =>'.$reason->getResponse()->getBody()->getContents()."\n";
 
             $bodyResponseContents = $reason->getResponse()->getBody()->getContents();
             $error = null;
 
             $r = json_decode($bodyResponseContents, true);
             if (json_last_error() === JSON_ERROR_NONE) {
-
                 if (isset($r['error'])) {
                     $error = $r['error'];
                 }
             }
-
-            /*$rejected[] = [
-                'ticketId' => $reason->getRequest()->getHeader('x-ticket-id')[0],
-                'error' => $error,
-                'statusCode' => $reason->getResponse()->getStatusCode(),
-            ];*/
         },
     ]);
 
@@ -193,26 +208,19 @@ do {
     // Force the pool of requests to complete.
     $promise->wait();
 
-    //Reset it at every iteration.
-    $toRetry = [];
-
     $lastProcessed = $batchTo;
 
-    echo "Finishing at ".date("H:i:s")."\n";
+    echo 'Finishing at '.date('H:i:s')."\n";
 
     unset($pool, $promise);
 
     gc_collect_cycles();
-
-    $rejected = [];
-
 } while (($batchTo + $quantityToProcess) < $toTicket);
-
 
 function saveTicketDocument($originalDocument)
 {
     if (!isset($originalDocument['tickets'])) {
-        throw new \Exception("Document without ticket: ".json_encode($originalDocument));
+        throw new \Exception('Document without ticket: '.json_encode($originalDocument));
     }
 
     $ticketData = $originalDocument['tickets'][0];
@@ -234,7 +242,7 @@ function saveTicketDocument($originalDocument)
                         $event['data']['downloaded_media'] = [
                             'filename' => $media['originFilename'],
                             'saved_filename' => $media['destinationFilename'],
-                            'type' => $media['type']
+                            'type' => $media['type'],
                         ];
                     }
                 }
@@ -249,7 +257,7 @@ function saveTicketDocument($originalDocument)
                         $attachment['downloaded_media'] = [
                             'filename' => $media['originFilename'],
                             'saved_filename' => $media['destinationFilename'],
-                            'type' => $media['type']
+                            'type' => $media['type'],
                         ];
                     }
                 }
@@ -293,7 +301,7 @@ function saveMedia($url, $ticketId, $mediaId, $isCall)
     ]);
 
     if ($response->getHeaderLine('Location') || $response->getStatusCode() === 302) {
-        echo "Got redirect response!";
+        echo 'Got redirect response!';
         exit;
     }
     $matchContentType = preg_match('/([\w\/]+)(;\s+charset=([^\s"]+))/', $response->getHeaderLine('Content-Type'), $contentTypeMatches);
@@ -328,4 +336,28 @@ function saveMedia($url, $ticketId, $mediaId, $isCall)
         'originFilename' => $originFilename,
         'destinationFilename' => $filename,
     ];
+}
+function get404TicketIds()
+{
+    $list = [];
+    if (file_exists('./404.json')) {
+        $list = json_decode(file_get_contents('./404.json'), true);
+    }
+
+    return $list;
+}
+function addTicketTo404($ticketId)
+{
+    $ticketId = (int) $ticketId;
+
+    if ($ticketId < 1) {
+        return false;
+    }
+
+    $list = get404TicketIds();
+    $list[] = (int) $ticketId;
+
+    file_put_contents('./404.json', json_encode($list));
+
+    return true;
 }
