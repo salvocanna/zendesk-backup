@@ -111,6 +111,7 @@ $requests = function ($from, $to) use ($ticketAuditUrl, $skipSavedTickets, $tick
             'Extra' => [
                 'Ticket-Id' => $i,
             ],
+            'timeout' => 5,
         ]);
     }
 };
@@ -298,6 +299,7 @@ function saveMedia($url, $ticketId, $mediaId, $isCall)
             CURLOPT_FORBID_REUSE => false,
             CURLOPT_FRESH_CONNECT => false,
         ],
+        'timeout' => 15,
     ]);
 
     if ($response->getHeaderLine('Location') || $response->getStatusCode() === 302) {
